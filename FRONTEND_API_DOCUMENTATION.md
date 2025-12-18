@@ -622,4 +622,3 @@ Pour toute question, contactez l'équipe backend.
 
 **Base URL**: `http://localhost:8000`  
 **Documentation API**: `http://localhost:8000/docs` (Swagger UI)
-

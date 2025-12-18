@@ -19,12 +19,13 @@ class Settings(BaseSettings):
     SMTP_USER: str = "ahmedouvallmohamedlemine@gmail.com"
     SMTP_PASSWORD: str = "irzx jqdr yjqu yjzj"
     EMAIL_FROM: str = "noreply@supnum.mr"
-    FRONTEND_URL: str = "http://localhost:3000"
+    FRONTEND_URL: str = "http://localhost:5173"
+    FRONTEND_VITE_URL: str = "http://localhost:5173"  # Vite default port
     
     # Cookie Configuration
     REFRESH_TOKEN_COOKIE_NAME: str = "refresh_token"
     REFRESH_TOKEN_COOKIE_HTTP_ONLY: bool = True
-    REFRESH_TOKEN_COOKIE_SECURE: bool = True  # Set to False in development if using HTTP
+    REFRESH_TOKEN_COOKIE_SECURE: bool = False  # Set to False in development (HTTP), True in production (HTTPS)
     REFRESH_TOKEN_COOKIE_SAME_SITE: str = "lax"  # "lax", "strict", or "none"
     
     class Config:

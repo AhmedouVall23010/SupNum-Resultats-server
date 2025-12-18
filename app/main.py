@@ -13,10 +13,18 @@ app = FastAPI(
 # CORS Middleware - Required for HttpOnly cookies to work with frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.FRONTEND_URL],  # Frontend URL
+    allow_origins=[
+        settings.FRONTEND_URL,
+        settings.FRONTEND_VITE_URL,
+        "http://localhost:5173",  # Vite default port
+        "http://localhost:5173",  # React default port
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,  # Required for cookies
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Include routers
