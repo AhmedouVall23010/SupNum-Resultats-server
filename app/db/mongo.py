@@ -24,3 +24,7 @@ users_collection = db.users
 # Get refresh tokens collection
 refresh_tokens_collection = db.refresh_tokens
 
+# Get notes collection
+notes_collection = db.notes
+# Note: _id is automatically unique in MongoDB, and we use matricule as _id
+

@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routes import auth
+from app.routes import auth, students
 from app.db.mongo import test_connection
 from app.core.config import settings
 
@@ -17,7 +17,7 @@ app.add_middleware(
         settings.FRONTEND_URL,
         settings.FRONTEND_VITE_URL,
         "http://localhost:5173",  # Vite default port
-        "http://localhost:5173",  # React default port
+        "http://localhost:3000",  # React default port
         "http://127.0.0.1:5173",
         "http://127.0.0.1:3000",
     ],
@@ -29,6 +29,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(auth.router)
+app.include_router(students.router)
 
 # Test MongoDB connection on startup
 @app.on_event("startup")

@@ -2,8 +2,10 @@ import pandas as pd
 import json
 import numpy as np
 
-df = pd.read_csv("PV S1-TC_2024-2025.xls - Worksheet.csv", header=None)
+df = pd.read_csv("PV S3-DSI_2024-2025_finale.xls - Worksheet.csv", header=None)
+# df = pd.read_csv("PV S3-DSI_2024-2025_finale.xls - Worksheet.csv", header=None)
 
+year = "2024-2025"
 # دالة لتحويل NaN إلى 0
 def clean_value(value):
     """تحويل NaN/None إلى 0 للقيم الرقمية، أو None للقيم النصية"""
@@ -59,7 +61,10 @@ for row in range(6, len(df)):
         "department": dept,
         "prenom": prenom,
         "nom": nom,
-        semester: {}
+        semester: {
+            "year": year,
+            "isPublic": False
+        }
     }
 
     # البحث عن أعمدة Moy General, Credit total, Decision في header

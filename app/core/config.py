@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     SMTP_USER: str = "ahmedouvallmohamedlemine@gmail.com"
     SMTP_PASSWORD: str = "irzx jqdr yjqu yjzj"
     EMAIL_FROM: str = "noreply@supnum.mr"
-    FRONTEND_URL: str = "http://localhost:5173"
+    FRONTEND_URL: str = "http://localhost:3000"
     FRONTEND_VITE_URL: str = "http://localhost:5173"  # Vite default port
     
     # Cookie Configuration
