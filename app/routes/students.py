@@ -1,6 +1,8 @@
-from fastapi import APIRouter, UploadFile, File, Query, HTTPException, status, Body
+from fastapi import APIRouter, UploadFile, File, Query, HTTPException, status, Body, Depends
 from app.services.csv_service import CSVService
 from app.services.note_service import NoteService
+from app.services.upload_service import save_csv_file, save_upload_info, get_user_email
+from app.core.dependencies import get_current_user_id
 from typing import Dict, Any, List
 import re
 
@@ -16,17 +18,20 @@ def validate_year_format(year: str) -> bool:
 @router.post("/upload-csv")
 async def upload_csv(
     file: UploadFile = File(..., description="CSV file to upload"),
-    year: str = Query(..., description="Year in format YYYY-YYYY (e.g., 2024-2025)")
+    year: str = Query(..., description="Year in format YYYY-YYYY (e.g., 2024-2025)"),
+    current_user_id: str = Depends(get_current_user_id)
 ) -> Dict[str, Any]:
     """
     Upload and process a CSV file containing student grades.
+    Saves the file to disk and stores upload information in database.
     
     Args:
         file: CSV file to upload
         year: Year string in format "YYYY-YYYY" (e.g., "2024-2025")
+        current_user_id: Current authenticated user ID (from token)
     
     Returns:
-        Dictionary containing processed student data
+        Dictionary containing processed student data and upload info
     """
     # Validate file type
     if not file.filename.endswith('.csv'):
@@ -45,17 +50,51 @@ async def upload_csv(
     try:
         # Read file content
         file_content = await file.read()
+        file_size = len(file_content)
+        
+        # Get user email
+        user_email = get_user_email(current_user_id)
+        if not user_email:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        # Save file to disk
+        saved_path = save_csv_file(file_content, file.filename)
         
         # Process CSV file
         students_data = CSVService.process_csv_file(file_content, year)
+        students_count = len(students_data)
+        
+        # Save upload information to database
+        upload_info = save_upload_info(
+            filename=file.filename,
+            saved_path=saved_path,
+            uploaded_by=current_user_id,
+            uploaded_by_email=user_email,
+            year=year,
+            students_count=students_count,
+            file_size=file_size
+        )
         
         return {
-            "message": "CSV file processed successfully",
+            "message": "CSV file processed and saved successfully",
             "year": year,
-            "students_count": len(students_data),
-            "students": students_data
+            "students_count": students_count,
+            "students": students_data,
+            "upload_info": {
+                "filename": upload_info["filename"],
+                "saved_path": upload_info["saved_path"],
+                "uploaded_by": str(upload_info["uploaded_by"]),
+                "uploaded_by_email": upload_info["uploaded_by_email"],
+                "uploaded_at": upload_info["uploaded_at"].isoformat(),
+                "file_size": upload_info["file_size"]
+            }
         }
     
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
