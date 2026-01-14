@@ -1,9 +1,14 @@
 from fastapi import APIRouter, UploadFile, File, Query, HTTPException, status, Body, Depends
 from app.services.csv_service import CSVService
 from app.services.note_service import NoteService
-from app.services.upload_service import save_csv_file, save_upload_info, get_user_email
-from app.core.dependencies import get_current_user_id
-from typing import Dict, Any, List
+from app.services.upload_service import (
+    save_csv_file, save_upload_info, get_user_email,
+    get_all_uploads, get_uploads_by_date_range, get_upload_by_id, delete_upload,
+    get_dashboard_stats
+)
+from app.core.dependencies import get_current_user_id, require_role
+from typing import Dict, Any, List, Optional
+from datetime import datetime
 import re
 
 router = APIRouter(prefix="/students", tags=["Students"])
@@ -15,7 +20,7 @@ def validate_year_format(year: str) -> bool:
     return bool(re.match(pattern, year))
 
 
-@router.post("/upload-csv")
+@router.post("/upload-csv", dependencies=[Depends(require_role("admin"))])
 async def upload_csv(
     file: UploadFile = File(..., description="CSV file to upload"),
     year: str = Query(..., description="Year in format YYYY-YYYY (e.g., 2024-2025)"),
@@ -60,23 +65,33 @@ async def upload_csv(
                 detail="User not found"
             )
         
-        # Save file to disk
-        saved_path = save_csv_file(file_content, file.filename)
-        
-        # Process CSV file
+        # Process CSV file FIRST (before saving to disk)
+        # This ensures we only save valid files
         students_data = CSVService.process_csv_file(file_content, year)
         students_count = len(students_data)
         
-        # Save upload information to database
-        upload_info = save_upload_info(
-            filename=file.filename,
-            saved_path=saved_path,
-            uploaded_by=current_user_id,
-            uploaded_by_email=user_email,
-            year=year,
-            students_count=students_count,
-            file_size=file_size
-        )
+        # Only save file to disk after successful processing
+        saved_path = save_csv_file(file_content, file.filename)
+        
+        try:
+            # Save upload information to database
+            upload_info = save_upload_info(
+                filename=file.filename,
+                saved_path=saved_path,
+                uploaded_by=current_user_id,
+                uploaded_by_email=user_email,
+                year=year,
+                students_count=students_count,
+                file_size=file_size
+            )
+        except Exception as db_error:
+            # If database save fails, delete the file to prevent orphaned files
+            from app.services.upload_service import delete_csv_file
+            delete_csv_file(saved_path)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error saving upload information: {str(db_error)}"
+            )
         
         return {
             "message": "CSV file processed and saved successfully",
@@ -102,9 +117,10 @@ async def upload_csv(
         )
 
 
-@router.post("/save-notes")
+@router.post("/save-notes", dependencies=[Depends(require_role("admin"))])
 async def save_notes(
-    students_data: Dict[int, Any] = Body(..., description="Dictionary of students data with matricule as key")
+    students_data: Dict[int, Any] = Body(..., description="Dictionary of students data with matricule as key"),
+    current_user_id: str = Depends(get_current_user_id)
 ) -> Dict[str, Any]:
     """
     Save or update student notes in MongoDB collection 'notes'.
@@ -130,11 +146,12 @@ async def save_notes(
         )
 
 
-@router.get("/notes")
+@router.get("/notes", dependencies=[Depends(require_role("admin"))])
 async def get_all_notes(
     semester: str = Query(None, description="Filter by semester (e.g., S3)"),
     department: str = Query(None, description="Filter by department"),
-    year: str = Query(None, description="Filter by year in format YYYY-YYYY (e.g., 2024-2025)")
+    year: str = Query(None, description="Filter by year in format YYYY-YYYY (e.g., 2024-2025)"),
+    current_user_id: str = Depends(get_current_user_id)
 ) -> Dict[str, Any]:
     """
     Get student notes from MongoDB with optional filters.
@@ -183,11 +200,12 @@ async def get_all_notes(
         )
 
 
-@router.get("/statistics")
+@router.get("/statistics", dependencies=[Depends(require_role("admin"))])
 async def get_statistics(
     semester: str = Query(None, description="Filter by semester (e.g., S3)"),
     department: str = Query(None, description="Filter by department"),
-    year: str = Query(None, description="Filter by year in format YYYY-YYYY (e.g., 2024-2025)")
+    year: str = Query(None, description="Filter by year in format YYYY-YYYY (e.g., 2024-2025)"),
+    current_user_id: str = Depends(get_current_user_id)
 ) -> Dict[str, Any]:
     """
     Get statistics for students with optional filters.
@@ -240,8 +258,11 @@ async def get_statistics(
         )
 
 
-@router.get("/notes/{matricule}")
-async def get_student_notes(matricule: int) -> Dict[str, Any]:
+@router.get("/notes/{matricule}", dependencies=[Depends(require_role("admin"))])
+async def get_student_notes(
+    matricule: int,
+    current_user_id: str = Depends(get_current_user_id)
+) -> Dict[str, Any]:
     """
     Get student notes by matricule.
     
@@ -258,4 +279,153 @@ async def get_student_notes(matricule: int) -> Dict[str, Any]:
             detail=f"Notes not found for matricule: {matricule}"
         )
     return notes
+
+
+@router.get("/uploads", dependencies=[Depends(require_role("admin"))])
+async def get_uploads(
+    start_date: Optional[str] = Query(None, description="Start date in ISO format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)"),
+    end_date: Optional[str] = Query(None, description="End date in ISO format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)"),
+    current_user_id: str = Depends(get_current_user_id)
+) -> Dict[str, Any]:
+    """
+    Get list of all uploaded CSV files with upload information.
+    Can filter by date range.
+    
+    Query Parameters:
+        start_date: Optional start date for filtering (ISO format)
+        end_date: Optional end date for filtering (ISO format)
+    
+    Returns:
+        Dictionary containing total count and list of uploads
+    """
+    try:
+        if start_date or end_date:
+            # Parse dates
+            if start_date:
+                try:
+                    start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                except ValueError:
+                    # Try date only format
+                    start_dt = datetime.fromisoformat(start_date)
+            else:
+                start_dt = datetime.min
+            
+            if end_date:
+                try:
+                    end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                except ValueError:
+                    # Try date only format and set to end of day
+                    end_dt = datetime.fromisoformat(end_date)
+                    end_dt = end_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+            else:
+                end_dt = datetime.utcnow()
+            
+            uploads = get_uploads_by_date_range(start_dt, end_dt)
+        else:
+            uploads = get_all_uploads()
+        
+        return {
+            "total": len(uploads),
+            "filters": {
+                "start_date": start_date,
+                "end_date": end_date
+            },
+            "uploads": uploads
+        }
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid date format: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error retrieving uploads: {str(e)}"
+        )
+
+
+@router.get("/uploads/{upload_id}", dependencies=[Depends(require_role("admin"))])
+async def get_upload_details(
+    upload_id: str,
+    current_user_id: str = Depends(get_current_user_id)
+) -> Dict[str, Any]:
+    """
+    Get details of a specific upload by ID.
+    
+    Args:
+        upload_id: Upload document ID
+    
+    Returns:
+        Upload document with all details
+    """
+    upload = get_upload_by_id(upload_id)
+    if not upload:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Upload not found with ID: {upload_id}"
+        )
+    return upload
+
+
+@router.delete("/uploads/{upload_id}", dependencies=[Depends(require_role("admin"))])
+async def delete_upload_file(
+    upload_id: str,
+    current_user_id: str = Depends(get_current_user_id)
+) -> Dict[str, Any]:
+    """
+    Delete an uploaded CSV file and its database record.
+    Only admins can delete uploads.
+    
+    Args:
+        upload_id: Upload document ID
+        current_user_id: Current authenticated user ID (from token)
+    
+    Returns:
+        Success message
+    """
+    try:
+        success = delete_upload(upload_id)
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Upload not found with ID: {upload_id}"
+            )
+        
+        return {
+            "message": "Upload deleted successfully",
+            "upload_id": upload_id
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error deleting upload: {str(e)}"
+        )
+
+
+@router.get("/dashboard", dependencies=[Depends(require_role("admin"))])
+async def get_dashboard(
+    current_user_id: str = Depends(get_current_user_id)
+) -> Dict[str, Any]:
+    """
+    Get dashboard statistics for the admin main page.
+    Returns overview statistics including total uploads, total students, 
+    last upload information, and recent uploads list.
+    
+    Returns:
+        Dictionary containing:
+        - total_uploads: Total number of uploaded files
+        - total_students: Total number of students
+        - last_upload: Information about the last uploaded file
+        - recent_uploads: List of recent uploads (last 5)
+    """
+    try:
+        stats = get_dashboard_stats()
+        return stats
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error retrieving dashboard statistics: {str(e)}"
+        )
 
