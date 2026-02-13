@@ -92,6 +92,7 @@ def save_upload_info(
     uploaded_by: str,
     uploaded_by_email: str,
     year: str,
+    semester: str,
     students_count: int,
     file_size: int
 ) -> Dict[str, Any]:
@@ -104,6 +105,7 @@ def save_upload_info(
         uploaded_by: User ID who uploaded the file
         uploaded_by_email: Email of user who uploaded
         year: Year string (e.g., "2024-2025")
+        semester: Semester string (e.g., "S3")
         students_count: Number of students processed
         file_size: File size in bytes
     
@@ -117,6 +119,7 @@ def save_upload_info(
         "uploaded_by_email": uploaded_by_email,
         "uploaded_at": datetime.utcnow(),
         "year": year,
+        "semester": semester,
         "students_count": students_count,
         "file_size": file_size
     }
@@ -192,31 +195,59 @@ def get_upload_by_id(upload_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def delete_upload(upload_id: str) -> bool:
+def delete_upload(upload_id: str) -> Dict[str, Any]:
     """
-    Delete an upload record and its associated file
+    Delete an upload record, its associated file, and all related notes.
+    Extracts year and semester from upload info and deletes all notes
+    associated with that semester and year.
     
     Args:
         upload_id: Upload document ID
     
     Returns:
-        True if deleted successfully, False otherwise
+        Dictionary with deletion results including notes deletion info
     """
     try:
         upload = csv_uploads_collection.find_one({"_id": ObjectId(upload_id)})
         if not upload:
-            return False
+            return {
+                "success": False,
+                "message": "Upload not found"
+            }
+        
+        # Extract year and semester from upload info
+        year = upload.get("year")
+        semester = upload.get("semester")
+        
+        # Delete related notes if year and semester are available
+        notes_deletion_result = None
+        if year and semester:
+            from app.services.note_service import NoteService
+            notes_deletion_result = NoteService.delete_notes_by_semester_and_year(semester, year)
         
         # Delete file from disk
         saved_path = upload.get("saved_path")
+        file_deleted = False
         if saved_path:
-            delete_csv_file(saved_path)
+            file_deleted = delete_csv_file(saved_path)
         
         # Delete record from database
         result = csv_uploads_collection.delete_one({"_id": ObjectId(upload_id)})
-        return result.deleted_count > 0
-    except Exception:
-        return False
+        upload_deleted = result.deleted_count > 0
+        
+        return {
+            "success": upload_deleted,
+            "upload_deleted": upload_deleted,
+            "file_deleted": file_deleted,
+            "notes_deletion": notes_deletion_result,
+            "year": year,
+            "semester": semester
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": str(e)
+        }
 
 
 def get_dashboard_stats() -> Dict[str, Any]:
@@ -250,6 +281,7 @@ def get_dashboard_stats() -> Dict[str, Any]:
             "uploaded_by_email": last_upload_doc.get("uploaded_by_email"),
             "uploaded_at": last_upload_doc.get("uploaded_at").isoformat() if isinstance(last_upload_doc.get("uploaded_at"), datetime) else None,
             "year": last_upload_doc.get("year"),
+            "semester": last_upload_doc.get("semester"),
             "students_count": last_upload_doc.get("students_count", 0)
         }
     
@@ -263,6 +295,7 @@ def get_dashboard_stats() -> Dict[str, Any]:
             "uploaded_by_email": upload.get("uploaded_by_email"),
             "uploaded_at": upload.get("uploaded_at").isoformat() if isinstance(upload.get("uploaded_at"), datetime) else None,
             "year": upload.get("year"),
+            "semester": upload.get("semester"),
             "students_count": upload.get("students_count", 0),
             "file_size": upload.get("file_size", 0)
         })

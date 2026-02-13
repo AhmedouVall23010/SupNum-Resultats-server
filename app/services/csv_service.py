@@ -2,7 +2,7 @@ import pandas as pd
 import json
 import numpy as np
 from io import BytesIO
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 
 
 def clean_value(value):
@@ -30,7 +30,7 @@ def parse_moyenne(moy):
 
 class CSVService:
     @staticmethod
-    def process_csv_file(file_content: bytes, year: str) -> Dict[int, Any]:
+    def process_csv_file(file_content: bytes, year: str) -> Tuple[Dict[int, Any], str]:
         """
         Process CSV file and extract student data
         
@@ -39,7 +39,7 @@ class CSVService:
             year: Year string in format "2024-2025"
         
         Returns:
-            Dictionary with student data keyed by matricule
+            Tuple of (Dictionary with student data keyed by matricule, semester string)
         """
         # Read CSV from bytes
         df = pd.read_csv(BytesIO(file_content), header=None)
@@ -249,5 +249,5 @@ class CSVService:
             for rank, (matricule, student_data) in enumerate(sorted_dept, start=1):
                 students[matricule][semester]["rang_department"] = rank
         
-        return students
+        return students, semester
 

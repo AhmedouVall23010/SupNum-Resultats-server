@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, Query, HTTPException, status, Body, Depends
+from fastapi import APIRouter, UploadFile, File, Query, HTTPException, status, Depends
 from app.services.csv_service import CSVService
 from app.services.note_service import NoteService
 from app.services.upload_service import (
@@ -6,7 +6,9 @@ from app.services.upload_service import (
     get_all_uploads, get_uploads_by_date_range, get_upload_by_id, delete_upload,
     get_dashboard_stats
 )
-from app.core.dependencies import get_current_user_id, require_role
+from app.core.dependencies import (
+    get_current_user_id, get_current_user_name, require_role, require_auth, get_token
+)
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 import re
@@ -28,7 +30,8 @@ async def upload_csv(
 ) -> Dict[str, Any]:
     """
     Upload and process a CSV file containing student grades.
-    Saves the file to disk and stores upload information in database.
+    Only processes the file and returns the data without saving.
+    Use save-notes endpoint to save the file and notes.
     
     Args:
         file: CSV file to upload
@@ -36,7 +39,66 @@ async def upload_csv(
         current_user_id: Current authenticated user ID (from token)
     
     Returns:
-        Dictionary containing processed student data and upload info
+        Dictionary containing processed student data (without saving)
+    """
+    # Validate file type
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File must be a CSV file"
+        )
+    
+    # Validate year format
+    if not validate_year_format(year):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Year must be in format YYYY-YYYY (e.g., 2024-2025)"
+        )
+    
+    try:
+        # Read file content
+        file_content = await file.read()
+        
+        # Process CSV file
+        students_data, semester = CSVService.process_csv_file(file_content, year)
+        students_count = len(students_data)
+        
+        return {
+            "message": "CSV file processed successfully",
+            "year": year,
+            "semester": semester,
+            "students_count": students_count,
+            "students": students_data
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error processing CSV file: {str(e)}"
+        )
+
+
+@router.post("/save-notes", dependencies=[Depends(require_role("admin"))])
+async def save_notes(
+    file: UploadFile = File(..., description="CSV file to save"),
+    year: str = Query(..., description="Year in format YYYY-YYYY (e.g., 2024-2025)"),
+    current_user_id: str = Depends(get_current_user_id)
+) -> Dict[str, Any]:
+    """
+    Save CSV file, upload information, and student notes in MongoDB.
+    Processes the file, saves it to disk, stores upload info, and saves notes.
+    Each document uses 'matricule' as the unique identifier.
+    Performs upsert operation (create if not exists, update if exists).
+    
+    Args:
+        file: CSV file to save
+        year: Year string in format "YYYY-YYYY" (e.g., "2024-2025")
+        current_user_id: Current authenticated user ID (from token)
+    
+    Returns:
+        Dictionary with operation results including upload info
     """
     # Validate file type
     if not file.filename.endswith('.csv'):
@@ -67,10 +129,10 @@ async def upload_csv(
         
         # Process CSV file FIRST (before saving to disk)
         # This ensures we only save valid files
-        students_data = CSVService.process_csv_file(file_content, year)
+        students_data, semester = CSVService.process_csv_file(file_content, year)
         students_count = len(students_data)
         
-        # Only save file to disk after successful processing
+        # Save file to disk
         saved_path = save_csv_file(file_content, file.filename)
         
         try:
@@ -81,6 +143,7 @@ async def upload_csv(
                 uploaded_by=current_user_id,
                 uploaded_by_email=user_email,
                 year=year,
+                semester=semester,
                 students_count=students_count,
                 file_size=file_size
             )
@@ -93,19 +156,33 @@ async def upload_csv(
                 detail=f"Error saving upload information: {str(db_error)}"
             )
         
+        # Save student notes
+        try:
+            notes_result = NoteService.save_multiple_students_notes(students_data)
+        except Exception as notes_error:
+            # If notes save fails, we still keep the file and upload info
+            # but report the error
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error saving notes: {str(notes_error)}"
+            )
+        
         return {
-            "message": "CSV file processed and saved successfully",
+            "message": "File and notes saved successfully",
             "year": year,
+            "semester": semester,
             "students_count": students_count,
-            "students": students_data,
             "upload_info": {
                 "filename": upload_info["filename"],
                 "saved_path": upload_info["saved_path"],
                 "uploaded_by": str(upload_info["uploaded_by"]),
                 "uploaded_by_email": upload_info["uploaded_by_email"],
                 "uploaded_at": upload_info["uploaded_at"].isoformat(),
+                "year": upload_info["year"],
+                "semester": upload_info["semester"],
                 "file_size": upload_info["file_size"]
-            }
+            },
+            "notes_results": notes_result
         }
     
     except HTTPException:
@@ -113,36 +190,7 @@ async def upload_csv(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error processing CSV file: {str(e)}"
-        )
-
-
-@router.post("/save-notes", dependencies=[Depends(require_role("admin"))])
-async def save_notes(
-    students_data: Dict[int, Any] = Body(..., description="Dictionary of students data with matricule as key"),
-    current_user_id: str = Depends(get_current_user_id)
-) -> Dict[str, Any]:
-    """
-    Save or update student notes in MongoDB collection 'notes'.
-    Each document uses 'matricule' as the unique identifier.
-    Performs upsert operation (create if not exists, update if exists).
-    
-    Args:
-        students_data: Dictionary with matricule as key and student data as value
-    
-    Returns:
-        Dictionary with operation results
-    """
-    try:
-        result = NoteService.save_multiple_students_notes(students_data)
-        return {
-            "message": "Notes saved successfully",
-            "results": result
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error saving notes: {str(e)}"
+            detail=f"Error saving file and notes: {str(e)}"
         )
 
 
@@ -281,6 +329,207 @@ async def get_student_notes(
     return notes
 
 
+@router.get("/my-notes", dependencies=[Depends(require_auth)])
+async def get_my_notes(
+    token: str = Depends(get_token)
+) -> Dict[str, Any]:
+    """
+    Get current student's notes.
+    Protected endpoint for students to access their own results.
+    Extracts matricule from token (name field) and returns all student notes.
+    
+    Returns:
+        Student notes document with all details including computed fields
+    """
+    try:
+        # Get name from token (assuming name is matricule)
+        name = get_current_user_name(token)
+        
+        # Try to convert name to int (matricule)
+        try:
+            matricule = int(name)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid student identifier in token"
+            )
+        
+        # Get student notes
+        notes = NoteService.get_student_notes(matricule)
+        
+        if not notes:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No notes found for this student"
+            )
+        
+        return notes
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error retrieving student notes: {str(e)}"
+        )
+
+
+@router.patch("/my-notes/{semester}/ispublic", dependencies=[Depends(require_auth)])
+async def update_my_semester_ispublic(
+    semester: str,
+    is_public: bool = Query(..., description="Set isPublic to true or false"),
+    token: str = Depends(get_token)
+) -> Dict[str, Any]:
+    """
+    Update isPublic field for a specific semester of the current student.
+    Protected endpoint for students to change visibility of their semester results.
+    
+    Args:
+        semester: Semester code (e.g., "S3")
+        is_public: Boolean value (true or false) for isPublic field
+        token: Authentication token
+    
+    Returns:
+        Dictionary with operation result
+    """
+    try:
+        # Get name from token (assuming name is matricule)
+        name = get_current_user_name(token)
+        
+        # Try to convert name to int (matricule)
+        try:
+            matricule = int(name)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid student identifier in token"
+            )
+        
+        # Validate semester format
+        if not semester.upper().startswith('S') or len(semester) < 2:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid semester format. Expected format: S1, S2, S3, etc."
+            )
+        
+        # Update isPublic
+        result = NoteService.update_semester_ispublic(matricule, semester.upper(), is_public)
+        
+        return {
+            "message": f"Semester {semester} visibility updated successfully",
+            "matricule": matricule,
+            "semester": semester.upper(),
+            "isPublic": is_public,
+            "updated": result["updated"]
+        }
+    
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error updating semester visibility: {str(e)}"
+        )
+
+
+@router.get("/public/{matricule}", dependencies=[Depends(require_auth)])
+async def get_student_public_notes(
+    matricule: int,
+    token: str = Depends(get_token)
+) -> Dict[str, Any]:
+    """
+    Get student information and public semester results.
+    Protected endpoint for students to view other students' public results.
+    Only returns semesters where isPublic = true.
+    
+    Args:
+        matricule: Student matricule number
+        token: Authentication token
+    
+    Returns:
+        Student document with only public semesters and computed fields
+    """
+    try:
+        # Get student public notes
+        notes = NoteService.get_student_public_notes(matricule)
+        
+        if not notes:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Student with matricule {matricule} not found or has no public results"
+            )
+        
+        return notes
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error retrieving student public notes: {str(e)}"
+        )
+
+
+@router.patch("/my-notes/ispublic-globale", dependencies=[Depends(require_auth)])
+async def update_my_ispublic_globale(
+    is_public_globale: bool = Query(..., description="Set isPublicGlobale to true or false"),
+    token: str = Depends(get_token)
+) -> Dict[str, Any]:
+    """
+    Update isPublicGlobale field for the current student.
+    Protected endpoint for students to change global visibility of their computed statistics.
+    When isPublicGlobale is false, computed fields (moyenne_generale_allsemestre, 
+    rang_generall_allsemestre, rang_allsemestre_dep) are not returned in public endpoint.
+    
+    Args:
+        is_public_globale: Boolean value (true or false) for isPublicGlobale field
+        token: Authentication token
+    
+    Returns:
+        Dictionary with operation result
+    """
+    try:
+        # Get name from token (assuming name is matricule)
+        name = get_current_user_name(token)
+        
+        # Try to convert name to int (matricule)
+        try:
+            matricule = int(name)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid student identifier in token"
+            )
+        
+        # Update isPublicGlobale
+        result = NoteService.update_ispublic_globale(matricule, is_public_globale)
+        
+        return {
+            "message": "Global visibility updated successfully",
+            "matricule": matricule,
+            "isPublicGlobale": is_public_globale,
+            "updated": result["updated"]
+        }
+    
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error updating global visibility: {str(e)}"
+        )
+
+
 @router.get("/uploads", dependencies=[Depends(require_role("admin"))])
 async def get_uploads(
     start_date: Optional[str] = Query(None, description="Start date in ISO format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)"),
@@ -373,7 +622,9 @@ async def delete_upload_file(
     current_user_id: str = Depends(get_current_user_id)
 ) -> Dict[str, Any]:
     """
-    Delete an uploaded CSV file and its database record.
+    Delete an uploaded CSV file, its database record, and all related notes.
+    Extracts year and semester from upload info and deletes all notes
+    associated with that semester and year.
     Only admins can delete uploads.
     
     Args:
@@ -381,19 +632,31 @@ async def delete_upload_file(
         current_user_id: Current authenticated user ID (from token)
     
     Returns:
-        Success message
+        Dictionary with deletion results including notes deletion info
     """
     try:
-        success = delete_upload(upload_id)
-        if not success:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Upload not found with ID: {upload_id}"
-            )
+        result = delete_upload(upload_id)
+        
+        if not result.get("success", False):
+            if result.get("message") == "Upload not found":
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Upload not found with ID: {upload_id}"
+                )
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Error deleting upload: {result.get('message', 'Unknown error')}"
+                )
         
         return {
-            "message": "Upload deleted successfully",
-            "upload_id": upload_id
+            "message": "Upload, file, and related notes deleted successfully",
+            "upload_id": upload_id,
+            "upload_deleted": result.get("upload_deleted", False),
+            "file_deleted": result.get("file_deleted", False),
+            "notes_deletion": result.get("notes_deletion"),
+            "year": result.get("year"),
+            "semester": result.get("semester")
         }
     except HTTPException:
         raise

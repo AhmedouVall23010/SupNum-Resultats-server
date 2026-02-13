@@ -1,14 +1,149 @@
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
 from app.db.mongo import notes_collection
 from datetime import datetime
+import re
 
 
 class NoteService:
+    @staticmethod
+    def get_niveau_from_semester(semester: str) -> str:
+        """
+        Determine niveau (L1, L2, L3) from semester number.
+        
+        Args:
+            semester: Semester string (e.g., "S1", "S2", "S3", etc.)
+        
+        Returns:
+            Niveau string ("L1", "L2", or "L3")
+        """
+        # Extract semester number from string (e.g., "S3" -> 3)
+        match = re.search(r'S(\d+)', semester.upper())
+        if not match:
+            return "L1"  # Default to L1 if can't parse
+        
+        semester_num = int(match.group(1))
+        
+        if semester_num <= 2:
+            return "L1"
+        elif semester_num <= 4:
+            return "L2"
+        else:
+            return "L3"
+    
+    @staticmethod
+    def compare_niveaux(niveau1: str, niveau2: str) -> int:
+        """
+        Compare two niveaux.
+        
+        Args:
+            niveau1: First niveau (e.g., "L1")
+            niveau2: Second niveau (e.g., "L2")
+        
+        Returns:
+            -1 if niveau1 < niveau2, 0 if equal, 1 if niveau1 > niveau2
+        """
+        niveau_order = {"L1": 1, "L2": 2, "L3": 3}
+        order1 = niveau_order.get(niveau1.upper(), 0)
+        order2 = niveau_order.get(niveau2.upper(), 0)
+        
+        if order1 < order2:
+            return -1
+        elif order1 > order2:
+            return 1
+        else:
+            return 0
+    
+    @staticmethod
+    def extract_niveau_from_string(niveau_str: str) -> Optional[Tuple[str, str]]:
+        """
+        Extract niveau and year from niveau string.
+        Format: "L1 – 2024-2025" or "L1 - 2024-2025"
+        
+        Args:
+            niveau_str: Niveau string (e.g., "L1 – 2024-2025")
+        
+        Returns:
+            Tuple of (niveau, year) or None if can't parse
+        """
+        if not niveau_str:
+            return None
+        
+        # Match pattern: L1/L2/L3 followed by dash and year
+        match = re.match(r'(L[123])\s*[–-]\s*(\d{4}-\d{4})', niveau_str.strip())
+        if match:
+            return (match.group(1), match.group(2))
+        return None
+    
+    @staticmethod
+    def calculate_niveau(semester: str, year: str) -> str:
+        """
+        Calculate niveau string from semester and year.
+        Format: "L1 – 2024-2025"
+        
+        Args:
+            semester: Semester string (e.g., "S3")
+            year: Year string (e.g., "2024-2025")
+        
+        Returns:
+            Niveau string (e.g., "L2 – 2024-2025")
+        """
+        niveau = NoteService.get_niveau_from_semester(semester)
+        return f"{niveau} – {year}"
+    
+    @staticmethod
+    def should_update_niveau(current_niveau: Optional[str], new_semester: str, new_year: str) -> Tuple[bool, str]:
+        """
+        Determine if niveau should be updated based on business rules.
+        - Cannot go back to lower niveau
+        - Update to higher niveau if new semester is higher
+        
+        Args:
+            current_niveau: Current niveau string (e.g., "L1 – 2024-2025") or None
+            new_semester: New semester being added (e.g., "S3")
+            new_year: Year of new semester (e.g., "2024-2025")
+        
+        Returns:
+            Tuple of (should_update: bool, new_niveau: str)
+        """
+        new_niveau_level = NoteService.get_niveau_from_semester(new_semester)
+        new_niveau_str = NoteService.calculate_niveau(new_semester, new_year)
+        
+        # If no current niveau, set to new niveau
+        if not current_niveau:
+            return (True, new_niveau_str)
+        
+        # Extract current niveau level and year
+        current_info = NoteService.extract_niveau_from_string(current_niveau)
+        if not current_info:
+            # If can't parse current, update to new
+            return (True, new_niveau_str)
+        
+        current_niveau_level, current_year = current_info
+        
+        # Compare niveaux
+        comparison = NoteService.compare_niveaux(current_niveau_level, new_niveau_level)
+        
+        if comparison < 0:
+            # New niveau is higher, update
+            return (True, new_niveau_str)
+        elif comparison > 0:
+            # New niveau is lower, don't update (business rule: can't go back)
+            return (False, current_niveau)
+        else:
+            # Same niveau level, check if same year
+            if current_year == new_year:
+                # Same niveau and year, keep current
+                return (False, current_niveau)
+            else:
+                # Same niveau but different year, update to new year
+                return (True, new_niveau_str)
     @staticmethod
     def save_student_notes(student_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Save or update student notes in MongoDB.
         Uses matricule as the _id (unique identifier) for upsert operation.
+        Merges new data with existing data instead of replacing it completely.
+        This allows adding new semesters without losing existing ones.
         
         Args:
             student_data: Dictionary containing student data with 'matricule' key
@@ -21,37 +156,105 @@ class NoteService:
         
         matricule = student_data["matricule"]
         
-        # Check if document exists to preserve created_at
+        # Check if document exists
         existing = notes_collection.find_one({"_id": matricule})
         
-        # Prepare document with _id as matricule and updated_at timestamp
-        document = {
-            "_id": matricule,  # Use matricule as _id
-            **student_data,
-            "updated_at": datetime.utcnow()
-        }
-        
-        # Preserve created_at if document exists, otherwise set it now
         if existing:
-            document["created_at"] = existing.get("created_at", datetime.utcnow())
+            # Document exists: merge new data with existing data
+            # Create update document that merges data instead of replacing
+            update_doc = {
+                "$set": {
+                    "updated_at": datetime.utcnow()
+                }
+            }
+            
+            # Update basic fields (department, prenom, nom) if provided
+            for field in ["department", "prenom", "nom"]:
+                if field in student_data:
+                    update_doc["$set"][field] = student_data[field]
+            
+            # Find semester and year from student_data to calculate niveau
+            new_semester = None
+            new_year = None
+            
+            # Merge semester data: add or update semesters without replacing existing ones
+            # Find all semester keys (S1, S2, S3, etc.) in student_data
+            for key, value in student_data.items():
+                if key not in ["matricule", "department", "prenom", "nom"] and isinstance(value, dict):
+                    # This is a semester (e.g., S3, S4)
+                    # Use dot notation to set/update the semester data
+                    update_doc["$set"][key] = value
+                    
+                    # Extract semester and year for niveau calculation
+                    if not new_semester and "year" in value:
+                        new_semester = key
+                        new_year = value.get("year")
+            
+            # Calculate and update niveau if semester data is present
+            if new_semester and new_year:
+                current_niveau = existing.get("niveau")
+                should_update, new_niveau = NoteService.should_update_niveau(
+                    current_niveau, new_semester, new_year
+                )
+                
+                if should_update:
+                    update_doc["$set"]["niveau"] = new_niveau
+            
+            # Perform update
+            result = notes_collection.update_one(
+                {"_id": matricule},
+                update_doc,
+                upsert=False
+            )
+            
+            operation = "updated"
         else:
-            document["created_at"] = datetime.utcnow()
+            # Document doesn't exist: create new one
+            document = {
+                "_id": matricule,
+                **student_data,
+                "isPublicGlobale": False,  # Default value for new students
+                "created_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow()
+            }
+            
+            # Calculate and set niveau for new document
+            # Find semester and year from student_data
+            new_semester = None
+            new_year = None
+            
+            for key, value in student_data.items():
+                if key not in ["matricule", "department", "prenom", "nom"] and isinstance(value, dict):
+                    if "year" in value:
+                        new_semester = key
+                        new_year = value.get("year")
+                        break
+            
+            if new_semester and new_year:
+                document["niveau"] = NoteService.calculate_niveau(new_semester, new_year)
+            
+            result = notes_collection.insert_one(document)
+            operation = "created"
         
-        # Replace document (upsert: create if not exists, replace if exists)
-        # Using replace_one instead of update_one because we need to set _id
-        result = notes_collection.replace_one(
-            {"_id": matricule},
-            document,
-            upsert=True
-        )
-        
-        return {
-            "matricule": matricule,
-            "matched_count": result.matched_count,
-            "modified_count": result.modified_count,
-            "upserted_id": str(result.upserted_id) if result.upserted_id else None,
-            "operation": "updated" if result.matched_count > 0 else "created"
-        }
+        # Prepare return value
+        if existing:
+            # For update_one result
+            return {
+                "matricule": matricule,
+                "matched_count": result.matched_count,
+                "modified_count": result.modified_count,
+                "upserted_id": None,
+                "operation": operation
+            }
+        else:
+            # For insert_one result
+            return {
+                "matricule": matricule,
+                "matched_count": 0,
+                "modified_count": 0,
+                "upserted_id": str(result.inserted_id) if result.inserted_id else None,
+                "operation": operation
+            }
     
     @staticmethod
     def save_multiple_students_notes(students_data: Dict[int, Any]) -> Dict[str, Any]:
@@ -87,34 +290,278 @@ class NoteService:
         return results
     
     @staticmethod
-    def get_student_notes(matricule: int) -> Dict[str, Any]:
+    def parse_moyenne(moy) -> float:
+        """Convert moyenne from string to float"""
+        if moy is None:
+            return 0.0
+        try:
+            if isinstance(moy, str):
+                moy = moy.replace(',', '.')
+            return float(moy)
+        except:
+            return 0.0
+    
+    @staticmethod
+    def calculate_moyenne_generale_allsemestre(student_doc: Dict[str, Any]) -> float:
         """
-        Get student notes by matricule.
+        Calculate moyenne_generale_allsemestre from all semesters.
+        moyenne_generale_allsemestre = (sum of all moyenne_generale) / count of semesters
+        
+        Args:
+            student_doc: Student document from database
+        
+        Returns:
+            Average of all moyenne_generale values, or 0.0 if no semesters
+        """
+        semesters = []
+        for key, value in student_doc.items():
+            if key not in ["_id", "matricule", "department", "prenom", "nom", "niveau", 
+                          "created_at", "updated_at"]:
+                if isinstance(value, dict) and "moyenne_generale" in value:
+                    moy = NoteService.parse_moyenne(value.get("moyenne_generale"))
+                    if moy > 0:  # Only count semesters with valid moyenne
+                        semesters.append(moy)
+        
+        if not semesters:
+            return 0.0
+        
+        return round(sum(semesters) / len(semesters), 2)
+    
+    @staticmethod
+    def calculate_all_semester_ranks(all_students: List[Dict[str, Any]]) -> Dict[int, Dict[str, int]]:
+        """
+        Calculate ranks for all students based on moyenne_generale_allsemestre.
+        Ranks are calculated separately by niveau (L3 first, then L2, then L1).
+        
+        Args:
+            all_students: List of all student documents
+        
+        Returns:
+            Dictionary with matricule as key and ranks as value
+        """
+        if not all_students:
+            return {}
+        
+        # Calculate moyenne_generale_allsemestre for all students
+        students_with_stats = []
+        for student in all_students:
+            moyenne_allsemestre = NoteService.calculate_moyenne_generale_allsemestre(student)
+            niveau = student.get("niveau", "")
+            
+            # Extract niveau level (L1, L2, L3)
+            niveau_info = NoteService.extract_niveau_from_string(niveau)
+            niveau_level = niveau_info[0] if niveau_info else "L1"
+            
+            # Ensure matricule is int
+            matricule = student["_id"]
+            if isinstance(matricule, str):
+                try:
+                    matricule = int(matricule)
+                except:
+                    pass
+            
+            students_with_stats.append({
+                "matricule": matricule,
+                "department": student.get("department", ""),
+                "moyenne_allsemestre": moyenne_allsemestre,
+                "niveau_level": niveau_level
+            })
+        
+        # Group students by niveau
+        students_by_niveau = {}
+        for student_info in students_with_stats:
+            niveau_level = student_info["niveau_level"]
+            if niveau_level not in students_by_niveau:
+                students_by_niveau[niveau_level] = []
+            students_by_niveau[niveau_level].append(student_info)
+        
+        # Calculate general ranks (all students, sorted by niveau then moyenne)
+        # Order: L3 first, then L2, then L1
+        all_students_sorted = []
+        for niveau_level in ["L3", "L2", "L1"]:
+            if niveau_level in students_by_niveau:
+                niveau_students = sorted(
+                    students_by_niveau[niveau_level],
+                    key=lambda x: x["moyenne_allsemestre"],
+                    reverse=True
+                )
+                all_students_sorted.extend(niveau_students)
+        
+        # Create ranks dictionary
+        ranks = {}
+        for rank, student_info in enumerate(all_students_sorted, start=1):
+            matricule = student_info["matricule"]
+            if matricule not in ranks:
+                ranks[matricule] = {}
+            ranks[matricule]["rang_generall_allsemestre"] = rank
+        
+        # Calculate department ranks (by niveau and department)
+        for niveau_level in ["L3", "L2", "L1"]:
+            if niveau_level not in students_by_niveau:
+                continue
+            
+            # Group by department
+            dept_students = {}
+            for student_info in students_by_niveau[niveau_level]:
+                dept = student_info["department"]
+                if dept not in dept_students:
+                    dept_students[dept] = []
+                dept_students[dept].append(student_info)
+            
+            # Calculate ranks for each department
+            for dept, dept_list in dept_students.items():
+                dept_list_sorted = sorted(
+                    dept_list,
+                    key=lambda x: x["moyenne_allsemestre"],
+                    reverse=True
+                )
+                
+                for rank, student_info in enumerate(dept_list_sorted, start=1):
+                    matricule = student_info["matricule"]
+                    if matricule not in ranks:
+                        ranks[matricule] = {}
+                    ranks[matricule]["rang_allsemestre_dep"] = rank
+        
+        return ranks
+    
+    @staticmethod
+    def add_computed_fields(student_doc: Dict[str, Any], all_students: List[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Add computed fields to student document.
+        These fields are calculated dynamically and not stored in database.
+        
+        Args:
+            student_doc: Student document
+            all_students: Optional list of all students for rank calculation
+        
+        Returns:
+            Student document with computed fields added
+        """
+        # Calculate moyenne_generale_allsemestre
+        moyenne_allsemestre = NoteService.calculate_moyenne_generale_allsemestre(student_doc)
+        student_doc["moyenne_generale_allsemestre"] = moyenne_allsemestre
+        
+        # Calculate ranks if all_students provided
+        if all_students:
+            ranks = NoteService.calculate_all_semester_ranks(all_students)
+            matricule = student_doc.get("_id") or student_doc.get("matricule")
+            # Convert to int if it's a string (for comparison with ranks dict keys)
+            if isinstance(matricule, str):
+                try:
+                    matricule = int(matricule)
+                except:
+                    pass
+            
+            if matricule in ranks:
+                student_doc["rang_generall_allsemestre"] = ranks[matricule].get("rang_generall_allsemestre", 0)
+                student_doc["rang_allsemestre_dep"] = ranks[matricule].get("rang_allsemestre_dep", 0)
+            else:
+                student_doc["rang_generall_allsemestre"] = 0
+                student_doc["rang_allsemestre_dep"] = 0
+        else:
+            student_doc["rang_generall_allsemestre"] = 0
+            student_doc["rang_allsemestre_dep"] = 0
+        
+        return student_doc
+    
+    @staticmethod
+    def get_student_public_notes(matricule: int) -> Optional[Dict[str, Any]]:
+        """
+        Get student notes with only public semesters (isPublic = true).
+        Returns student information and only semesters that are marked as public.
         
         Args:
             matricule: Student matricule number (used as _id)
         
         Returns:
-            Student notes document or None if not found
+            Student notes document with only public semesters, or None if not found
+        """
+        document = notes_collection.find_one({"_id": matricule})
+        if not document:
+            return None
+        
+        # Convert _id (matricule) to string for JSON serialization
+        document["_id"] = str(document["_id"])
+        
+        # Get isPublicGlobale value
+        is_public_globale = document.get("isPublicGlobale", False)
+        
+        # Filter semesters to only include public ones
+        filtered_doc = {
+            "_id": document["_id"],
+            "matricule": document.get("matricule"),
+            "department": document.get("department"),
+            "prenom": document.get("prenom"),
+            "nom": document.get("nom"),
+            "niveau": document.get("niveau")
+        }
+        
+        # Add only public semesters
+        for key, value in document.items():
+            if key not in ["_id", "matricule", "department", "prenom", "nom", "niveau", 
+                          "created_at", "updated_at", "isPublicGlobale"]:
+                if isinstance(value, dict) and value.get("isPublic") is True:
+                    filtered_doc[key] = value
+        
+        # Add computed fields only if isPublicGlobale is true
+        if is_public_globale:
+            # Get all students for rank calculation (needed for computed fields)
+            all_students = list(notes_collection.find())
+            for s in all_students:
+                s["_id"] = str(s["_id"])
+            
+            # Add computed fields
+            filtered_doc = NoteService.add_computed_fields(filtered_doc, all_students)
+        # If isPublicGlobale is false, don't include computed fields at all
+        
+        return filtered_doc
+    
+    @staticmethod
+    def get_student_notes(matricule: int) -> Dict[str, Any]:
+        """
+        Get student notes by matricule.
+        Includes computed fields: moyenne_generale_allsemestre, rang_generall_allsemestre, rang_allsemestre_dep.
+        
+        Args:
+            matricule: Student matricule number (used as _id)
+        
+        Returns:
+            Student notes document with computed fields or None if not found
         """
         document = notes_collection.find_one({"_id": matricule})
         if document:
             # Convert _id (matricule) to string for JSON serialization
             document["_id"] = str(document["_id"])
+            
+            # Get all students for rank calculation
+            all_students = list(notes_collection.find())
+            # Convert _id to string for consistency
+            for s in all_students:
+                s["_id"] = str(s["_id"])
+            
+            # Add computed fields
+            document = NoteService.add_computed_fields(document, all_students)
+        
         return document
     
     @staticmethod
     def get_all_notes() -> List[Dict[str, Any]]:
         """
         Get all student notes.
+        Includes computed fields: moyenne_generale_allsemestre, rang_generall_allsemestre, rang_allsemestre_dep.
         
         Returns:
-            List of all student notes documents
+            List of all student notes documents with computed fields
         """
         documents = list(notes_collection.find())
+        # Convert _id (matricule) to string for JSON serialization
         for doc in documents:
-            # Convert _id (matricule) to string for JSON serialization
             doc["_id"] = str(doc["_id"])
+        
+        # Add computed fields to all documents
+        for doc in documents:
+            NoteService.add_computed_fields(doc, documents)
+        
         return documents
     
     @staticmethod
@@ -170,6 +617,15 @@ class NoteService:
             # Convert _id (matricule) to string for JSON serialization
             doc["_id"] = str(doc["_id"])
             filtered_docs.append(doc)
+        
+        # Add computed fields to filtered documents
+        # Get all students for rank calculation
+        all_students = list(notes_collection.find())
+        for s in all_students:
+            s["_id"] = str(s["_id"])
+        
+        for doc in filtered_docs:
+            NoteService.add_computed_fields(doc, all_students)
         
         return filtered_docs
     
@@ -298,5 +754,119 @@ class NoteService:
             "rattrapage_percentage": round(rattrapage_percentage, 2),
             "average_distribution": average_distribution,
             "total_average": round(total_average, 2)
+        }
+    
+    @staticmethod
+    def delete_notes_by_semester_and_year(semester: str, year: str) -> Dict[str, Any]:
+        """
+        Delete all notes associated with a specific semester and year.
+        Removes the semester field from all student documents that have it.
+        
+        Args:
+            semester: Semester code (e.g., "S3")
+            year: Year string in format "YYYY-YYYY" (e.g., "2024-2025")
+        
+        Returns:
+            Dictionary with deletion results
+        """
+        # Find all documents that have this semester with this year
+        query = {
+            f"{semester}.year": year
+        }
+        
+        # Use $unset to remove the semester field from matching documents
+        result = notes_collection.update_many(
+            query,
+            {
+                "$unset": {semester: ""},
+                "$set": {"updated_at": datetime.utcnow()}
+            }
+        )
+        
+        return {
+            "semester": semester,
+            "year": year,
+            "matched_count": result.matched_count,
+            "modified_count": result.modified_count
+        }
+    
+    @staticmethod
+    def update_semester_ispublic(matricule: int, semester: str, is_public: bool) -> Dict[str, Any]:
+        """
+        Update isPublic field for a specific semester of a student.
+        
+        Args:
+            matricule: Student matricule number
+            semester: Semester code (e.g., "S3")
+            is_public: Boolean value for isPublic field
+        
+        Returns:
+            Dictionary with operation result
+        """
+        # Check if student document exists
+        student_doc = notes_collection.find_one({"_id": matricule})
+        if not student_doc:
+            raise ValueError(f"Student with matricule {matricule} not found")
+        
+        # Check if semester exists
+        if semester not in student_doc:
+            raise ValueError(f"Semester {semester} not found for student {matricule}")
+        
+        # Update isPublic field using dot notation
+        result = notes_collection.update_one(
+            {"_id": matricule},
+            {
+                "$set": {
+                    f"{semester}.isPublic": is_public,
+                    "updated_at": datetime.utcnow()
+                }
+            }
+        )
+        
+        if result.matched_count == 0:
+            raise ValueError(f"Failed to update semester {semester} for student {matricule}")
+        
+        return {
+            "matricule": matricule,
+            "semester": semester,
+            "isPublic": is_public,
+            "updated": result.modified_count > 0
+        }
+    
+    @staticmethod
+    def update_ispublic_globale(matricule: int, is_public_globale: bool) -> Dict[str, Any]:
+        """
+        Update isPublicGlobale field for a student.
+        
+        Args:
+            matricule: Student matricule number
+            is_public_globale: Boolean value for isPublicGlobale field
+        
+        Returns:
+            Dictionary with operation result
+        """
+        # Check if student document exists
+        student_doc = notes_collection.find_one({"_id": matricule})
+        if not student_doc:
+            raise ValueError(f"Student with matricule {matricule} not found")
+        
+        # Update isPublicGlobale field
+        result = notes_collection.update_one(
+            {"_id": matricule},
+            {
+                "$set": {
+                    "isPublicGlobale": is_public_globale,
+                    "updated_at": datetime.utcnow()
+                }
+            }
+        )
+        
+        if result.matched_count == 0:
+            raise ValueError(f"Failed to update isPublicGlobale for student {matricule}")
+        
+        return {
+            "matricule": matricule,
+            "isPublicGlobale": is_public_globale,
+            "updated": result.modified_count > 0
         }
 
