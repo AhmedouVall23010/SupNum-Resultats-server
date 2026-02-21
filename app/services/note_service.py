@@ -91,20 +91,165 @@ class NoteService:
         return f"{niveau} – {year}"
     
     @staticmethod
-    def should_update_niveau(current_niveau: Optional[str], new_semester: str, new_year: str) -> Tuple[bool, str]:
+    def get_next_year(year: str) -> str:
         """
-        Determine if niveau should be updated based on business rules.
-        - Cannot go back to lower niveau
-        - Update to higher niveau if new semester is higher
+        Get next academic year.
+        
+        Args:
+            year: Year string in format "2024-2025"
+        
+        Returns:
+            Next year string (e.g., "2025-2026")
+        """
+        try:
+            start_year, end_year = year.split('-')
+            next_start = str(int(start_year) + 1)
+            next_end = str(int(end_year) + 1)
+            return f"{next_start}-{next_end}"
+        except:
+            return year
+    
+    @staticmethod
+    def check_promotion_to_l2(student_doc: Dict[str, Any]) -> bool:
+        """
+        Check if student can be promoted to L2.
+        Condition: (moyenne_generale S1 + moyenne_generale S2) / 2 >= 10 
+                   AND (credit_total S1 + credit_total S2) >= 39
+        
+        Args:
+            student_doc: Student document from database
+        
+        Returns:
+            True if student can be promoted to L2, False otherwise
+        """
+        s1_data = student_doc.get("S1", {})
+        s2_data = student_doc.get("S2", {})
+        
+        # Check if both S1 and S2 exist
+        if not s1_data or not s2_data:
+            return False
+        
+        # Get moyenne_generale for S1 and S2
+        moy_s1 = NoteService.parse_moyenne(s1_data.get("moyenne_generale", 0))
+        moy_s2 = NoteService.parse_moyenne(s2_data.get("moyenne_generale", 0))
+        
+        # Get credit_total for S1 and S2
+        credit_s1 = s1_data.get("credit_total", 0)
+        credit_s2 = s2_data.get("credit_total", 0)
+        
+        # Convert credits to int if needed
+        try:
+            credit_s1 = int(float(str(credit_s1).replace(',', '.')))
+        except:
+            credit_s1 = 0
+        
+        try:
+            credit_s2 = int(float(str(credit_s2).replace(',', '.')))
+        except:
+            credit_s2 = 0
+        
+        # Calculate average
+        avg_moy = (moy_s1 + moy_s2) / 2
+        
+        # Check conditions
+        return avg_moy >= 10 and (credit_s1 + credit_s2) >= 39
+    
+    @staticmethod
+    def check_promotion_to_l3(student_doc: Dict[str, Any]) -> bool:
+        """
+        Check if student can be promoted to L3.
+        Condition: (moyenne_generale S3 + moyenne_generale S4) / 2 >= 10 
+                   AND (credit_total S1 + credit_total S2) >= 39 
+                   AND (credit_total S3 + credit_total S4) >= 60
+        
+        Args:
+            student_doc: Student document from database
+        
+        Returns:
+            True if student can be promoted to L3, False otherwise
+        """
+        s1_data = student_doc.get("S1", {})
+        s2_data = student_doc.get("S2", {})
+        s3_data = student_doc.get("S3", {})
+        s4_data = student_doc.get("S4", {})
+        
+        # Check if all required semesters exist
+        if not s1_data or not s2_data or not s3_data or not s4_data:
+            return False
+        
+        # Get moyenne_generale for S3 and S4
+        moy_s3 = NoteService.parse_moyenne(s3_data.get("moyenne_generale", 0))
+        moy_s4 = NoteService.parse_moyenne(s4_data.get("moyenne_generale", 0))
+        
+        # Get credit_total for all semesters
+        credit_s1 = s1_data.get("credit_total", 0)
+        credit_s2 = s2_data.get("credit_total", 0)
+        credit_s3 = s3_data.get("credit_total", 0)
+        credit_s4 = s4_data.get("credit_total", 0)
+        
+        # Convert credits to int if needed
+        try:
+            credit_s1 = int(float(str(credit_s1).replace(',', '.')))
+            credit_s2 = int(float(str(credit_s2).replace(',', '.')))
+            credit_s3 = int(float(str(credit_s3).replace(',', '.')))
+            credit_s4 = int(float(str(credit_s4).replace(',', '.')))
+        except:
+            return False
+        
+        # Calculate average for S3 and S4
+        avg_moy = (moy_s3 + moy_s4) / 2
+        
+        # Check conditions
+        credits_l1 = credit_s1 + credit_s2
+        credits_l2 = credit_s3 + credit_s4
+        
+        return avg_moy >= 10 and credits_l1 >= 39 and credits_l2 >= 60
+    
+    @staticmethod
+    def should_update_niveau(current_niveau: Optional[str], new_semester: str, new_year: str, student_doc: Dict[str, Any]) -> Tuple[bool, str]:
+        """
+        Determine if niveau should be updated based on business rules with promotion conditions.
+        
+        Special rules:
+        - S2: Check promotion to L2: (moy S1 + moy S2)/2 >= 10 AND (credits S1 + credits S2) >= 39
+          - If promoted: L2 – next_year
+          - If not: L1 – current_year
+        - S4: Check promotion to L3: (moy S3 + moy S4)/2 >= 10 AND (credits S1+S2) >= 39 AND (credits S3+S4) >= 60
+          - If promoted: L3 – next_year
+          - If not: L2 – current_year
         
         Args:
             current_niveau: Current niveau string (e.g., "L1 – 2024-2025") or None
-            new_semester: New semester being added (e.g., "S3")
+            new_semester: New semester being added (e.g., "S2", "S4")
             new_year: Year of new semester (e.g., "2024-2025")
+            student_doc: Student document with all semesters
         
         Returns:
             Tuple of (should_update: bool, new_niveau: str)
         """
+        # Special handling for S2 (promotion to L2)
+        if new_semester.upper() == "S2":
+            can_promote = NoteService.check_promotion_to_l2(student_doc)
+            if can_promote:
+                # Promoted to L2, use next year
+                next_year = NoteService.get_next_year(new_year)
+                return (True, f"L2 – {next_year}")
+            else:
+                # Not promoted, stay in L1 with current year
+                return (True, f"L1 – {new_year}")
+        
+        # Special handling for S4 (promotion to L3)
+        if new_semester.upper() == "S4":
+            can_promote = NoteService.check_promotion_to_l3(student_doc)
+            if can_promote:
+                # Promoted to L3, use next year
+                next_year = NoteService.get_next_year(new_year)
+                return (True, f"L3 – {next_year}")
+            else:
+                # Not promoted, stay in L2 with current year
+                return (True, f"L2 – {new_year}")
+        
+        # For other semesters, use default logic
         new_niveau_level = NoteService.get_niveau_from_semester(new_semester)
         new_niveau_str = NoteService.calculate_niveau(new_semester, new_year)
         
@@ -192,9 +337,14 @@ class NoteService:
             
             # Calculate and update niveau if semester data is present
             if new_semester and new_year:
+                # Get updated document with new semester to check promotion conditions
+                # We need to merge the new semester data with existing data for checks
+                temp_doc = existing.copy()
+                temp_doc.update(update_doc.get("$set", {}))
+                
                 current_niveau = existing.get("niveau")
                 should_update, new_niveau = NoteService.should_update_niveau(
-                    current_niveau, new_semester, new_year
+                    current_niveau, new_semester, new_year, temp_doc
                 )
                 
                 if should_update:
@@ -231,7 +381,11 @@ class NoteService:
                         break
             
             if new_semester and new_year:
-                document["niveau"] = NoteService.calculate_niveau(new_semester, new_year)
+                # For new students, check promotion conditions
+                should_update, new_niveau = NoteService.should_update_niveau(
+                    None, new_semester, new_year, document
+                )
+                document["niveau"] = new_niveau
             
             result = notes_collection.insert_one(document)
             operation = "created"
