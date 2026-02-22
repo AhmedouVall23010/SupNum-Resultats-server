@@ -11,6 +11,7 @@ db = client[settings.DATABASE_NAME]
 # Test connection
 def test_connection():
     try:
+        print(client)
         client.admin.command('ping')
         print("MongoDB connection successful!")
         return True
