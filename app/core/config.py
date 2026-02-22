@@ -28,6 +28,16 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_COOKIE_SECURE: bool = False  # Set to False in development (HTTP), True in production (HTTPS)
     REFRESH_TOKEN_COOKIE_SAME_SITE: str = "lax"  # "lax", "strict", or "none"
     
+    # Storage Configuration
+    # Options: "local" (for PythonAnywhere, local development) or "s3" (for cloud platforms)
+    STORAGE_TYPE: str = "local"  # "local" or "s3"
+    
+    # AWS S3 Configuration (only needed if STORAGE_TYPE="s3")
+    AWS_ACCESS_KEY_ID: Optional[str] = None
+    AWS_SECRET_ACCESS_KEY: Optional[str] = None
+    AWS_REGION: str = "us-east-1"
+    AWS_S3_BUCKET_NAME: Optional[str] = None
+    
     class Config:
         env_file = ".env"
         case_sensitive = True

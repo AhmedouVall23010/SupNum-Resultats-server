@@ -4,13 +4,14 @@ from datetime import datetime
 from typing import Dict, Any, Optional, List
 from bson import ObjectId
 from app.db.mongo import db, users_collection
+from app.services.storage_service import (
+    save_file,
+    delete_file,
+    generate_unique_filename
+)
 
 # Get CSV uploads collection
 csv_uploads_collection = db.csv_uploads
-
-# Create uploads directory if it doesn't exist
-UPLOADS_DIR = "uploads/csv"
-os.makedirs(UPLOADS_DIR, exist_ok=True)
 
 
 def get_user_email(user_id: str) -> Optional[str]:
@@ -24,66 +25,31 @@ def get_user_email(user_id: str) -> Optional[str]:
         return None
 
 
-def generate_unique_filename(original_filename: str) -> str:
-    """
-    Generate a unique filename with timestamp and UUID to prevent collisions
-    
-    Args:
-        original_filename: Original filename
-    
-    Returns:
-        Unique filename
-    """
-    # Generate timestamp with microsecond precision
-    timestamp = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S-%f")
-    # Generate UUID for additional uniqueness
-    unique_id = str(uuid.uuid4())[:8]
-    # Remove any path separators from original filename for security
-    safe_filename = os.path.basename(original_filename)
-    # Create unique filename with timestamp, UUID, and original name
-    filename = f"{timestamp}_{unique_id}_{safe_filename}"
-    return filename
-
-
 def save_csv_file(file_content: bytes, original_filename: str) -> str:
     """
-    Save CSV file to disk and return the saved path
+    Save CSV file to storage (local or S3) and return the saved path/key
     
     Args:
         file_content: File content as bytes
         original_filename: Original filename
     
     Returns:
-        Saved file path
+        Saved file path (for local) or S3 key (for S3)
     """
-    # Generate unique filename
-    filename = generate_unique_filename(original_filename)
-    file_path = os.path.join(UPLOADS_DIR, filename)
-    
-    # Save file
-    with open(file_path, "wb") as f:
-        f.write(file_content)
-    
-    return file_path
+    return save_file(file_content, original_filename)
 
 
-def delete_csv_file(file_path: str) -> bool:
+def delete_csv_file(file_path_or_key: str) -> bool:
     """
-    Delete a CSV file from disk
+    Delete a CSV file from storage
     
     Args:
-        file_path: Path to the file to delete
+        file_path_or_key: Path to the file (for local) or S3 key (for S3)
     
     Returns:
         True if file was deleted, False otherwise
     """
-    try:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            return True
-        return False
-    except Exception:
-        return False
+    return delete_file(file_path_or_key)
 
 
 def save_upload_info(
