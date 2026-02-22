@@ -4,7 +4,7 @@ from typing import Optional
 
 class Settings(BaseSettings):
     # MongoDB Configuration
-    MONGODB_URL: str = "mongodb://admin:123456@localhost:27017"
+    MONGODB_URL: str = "mongodb+srv://23028_db_user:cMXRNHrDR7yyZE3c@cluster0.yvvzlka.mongodb.net/?appName=Cluster0"
     DATABASE_NAME: str = "app_db"
     
     # JWT Configuration
